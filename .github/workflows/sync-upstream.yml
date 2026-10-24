@@ -3,7 +3,7 @@ name: Sync Upstream Base Image
 on:
   schedule:
     # 每 6 小时检查一次上游 soulter/astrbot 的 latest 与 nightly-latest
-    - cron: '17 */6 * * *'
+    - cron: '0 */1 * * *'
   workflow_dispatch:
     inputs:
       force:
