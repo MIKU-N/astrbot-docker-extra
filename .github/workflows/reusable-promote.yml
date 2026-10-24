@@ -1,0 +1,70 @@
+name: 提升发布标签
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: GHCR 镜像名
+        required: true
+        type: string
+      source_tag:
+        description: 候选标签名（不含镜像名）
+        required: true
+        type: string
+      target_tag:
+        description: 目标标签名（不含镜像名）
+        required: true
+        type: string
+
+jobs:
+  promote:
+    name: 提升 ${{ inputs.target_tag }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 登录 Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: 启用 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 仅在构建与冒烟全部通过后调用，把候选标签提升为通道的正式标签
+      - name: 提升标签
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+          DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO }}
+        run: |
+          set -euo pipefail
+          source_ref="$IMAGE_NAME:$SOURCE_TAG"
+          target_ref="$IMAGE_NAME:$TARGET_TAG"
+          docker buildx imagetools create --tag "$target_ref" "$source_ref"
+          echo "- 已提升 \`$target_ref\` → \`$source_ref\`" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            repo="$DOCKERHUB_REPO"
+            if [ -z "$repo" ]; then
+              repo="${GITHUB_REPOSITORY##*/}"
+            fi
+            hub_name="$(echo "$DOCKERHUB_USERNAME/$repo" | tr '[:upper:]' '[:lower:]')"
+            hub_image="docker.io/$hub_name"
+            docker buildx imagetools create --tag "$hub_image:$TARGET_TAG" "$source_ref"
+            echo "- 已提升 \`$hub_image:$TARGET_TAG\` → \`$source_ref\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

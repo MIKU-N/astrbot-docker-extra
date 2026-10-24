@@ -1,0 +1,74 @@
+name: Build & Publish AstrBot Extended Image
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '手动指定镜像标签（如 v1.0.0），留空则按分支/SHA 自动生成'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+  actions: write
+
+jobs:
+  # PR 校验：只构建 amd64 且不推送，在本机跑完依赖冒烟测试即可
+  pr-verify:
+    name: PR 校验（amd64）
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-build-arch.yml
+    with:
+      arch: amd64
+      platform: linux/amd64
+      lock_file: '.upstream/latest.lock'
+      publish: false
+      run_smoke_test: true
+      cache_scope: stable-amd64
+    secrets: inherit
+
+  # 正式发布：走稳定通道，amd64 与 arm64 各自构建冒烟后再合并清单
+  release-stable:
+    name: 发布稳定通道
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/channel-stable.yml
+    with:
+      publish_latest: true
+      promote: false
+      run_smoke_test: true
+      image_tag: ${{ inputs.image_tag }}
+    secrets: inherit
+
+  summary:
+    name: 写入构建摘要
+    needs: [pr-verify, release-stable]
+    if: always() && (needs.pr-verify.result == 'success' || needs.release-stable.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总
+        env:
+          PR_RESULT: ${{ needs.pr-verify.result }}
+          RELEASE_RESULT: ${{ needs.release-stable.result }}
+          PRIMARY: ${{ needs.release-stable.outputs.primary }}
+          GHCR_IMAGE: ${{ needs.release-stable.outputs.ghcr_image }}
+        run: |
+          {
+            echo "### 镜像构建完成"
+            echo ""
+            echo "- 架构: \`linux/amd64, linux/arm64\`"
+            echo "- 通道: \`stable\`"
+            echo "- PR 校验: \`$PR_RESULT\`"
+            echo "- 发布结果: \`$RELEASE_RESULT\`"
+            if [ -n "$PRIMARY" ]; then
+              echo "- 主标签: \`$PRIMARY\`"
+              echo "- GHCR: \`$GHCR_IMAGE\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

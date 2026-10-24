@@ -1,0 +1,83 @@
+name: 计算最终标签集
+description: 在 metadata-action 产出的标签基础上应用通道前缀，并按需剔除 latest 标签
+
+inputs:
+  all_tags:
+    description: metadata-action 输出的标签列表（逗号分隔）
+    required: true
+  prefix:
+    description: 通道标签前缀；稳定通道留空，nightly 通道填 nightly-
+    required: false
+    default: ''
+  publish_latest:
+    description: 是否保留 latest 标签；填 false 时留给提升步骤在验证通过后再创建
+    required: false
+    default: 'true'
+  latest_tag:
+    description: 该通道的 latest 标签名（稳定通道 latest，nightly 通道 nightly-latest）
+    required: false
+    default: 'latest'
+
+outputs:
+  tags:
+    description: 最终标签列表（逗号分隔）
+    value: ${{ steps.tagset.outputs.tags }}
+  primary:
+    description: 主标签完整引用
+    value: ${{ steps.tagset.outputs.primary }}
+  primary_tag:
+    description: 主标签名（不含镜像名）
+    value: ${{ steps.tagset.outputs.primary_tag }}
+  latest_tag:
+    description: 该通道的 latest 标签名
+    value: ${{ steps.tagset.outputs.latest_tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: 计算最终标签集
+      id: tagset
+      shell: bash
+      env:
+        ALL_TAGS: ${{ inputs.all_tags }}
+        PREFIX: ${{ inputs.prefix }}
+        PUBLISH_LATEST: ${{ inputs.publish_latest }}
+        LATEST_TAG: ${{ inputs.latest_tag }}
+      run: |
+        set -euo pipefail
+        prefix="$PREFIX"
+        latest_tag="$LATEST_TAG"
+
+        # 1) 通道前缀：nightly 通道的所有标签都变成 nightly-<tag>，与稳定通道完全隔离
+        tags="$ALL_TAGS"
+        if [ -n "$prefix" ]; then
+          prefixed=""
+          IFS=',' read -ra LIST <<< "$ALL_TAGS"
+          for t in "${LIST[@]}"; do
+            prefixed="${prefixed:+$prefixed,}${t%:*}:${prefix}${t##*:}"
+          done
+          tags="$prefixed"
+        fi
+
+        # 2) publish_latest=false 时剔除 latest，留给提升步骤在验证通过后统一创建
+        if [ "$PUBLISH_LATEST" = "false" ]; then
+          kept=""
+          IFS=',' read -ra LIST <<< "$tags"
+          for t in "${LIST[@]}"; do
+            if [ "${t##*:}" != "$latest_tag" ]; then
+              kept="${kept:+$kept,}$t"
+            fi
+          done
+          tags="$kept"
+        fi
+
+        if [ -z "$tags" ]; then
+          echo "::error::标签集为空，中止构建"
+          exit 1
+        fi
+
+        primary="${tags%%,*}"
+        echo "tags=$tags" >> "$GITHUB_OUTPUT"
+        echo "primary=$primary" >> "$GITHUB_OUTPUT"
+        echo "primary_tag=${primary##*:}" >> "$GITHUB_OUTPUT"
+        echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,119 @@
+name: 合并架构清单并发布
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: GHCR 镜像名
+        required: true
+        type: string
+      tags:
+        description: 需要发布的标签列表（逗号分隔）
+        required: true
+        type: string
+      digest_amd64:
+        description: amd64 架构镜像 digest
+        required: true
+        type: string
+      digest_arm64:
+        description: arm64 架构镜像 digest
+        required: true
+        type: string
+    outputs:
+      primary:
+        description: 主标签完整引用
+        value: ${{ jobs.publish.outputs.primary }}
+
+jobs:
+  publish:
+    name: 合并清单并推送
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      primary: ${{ steps.manifest.outputs.primary }}
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 登录 Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: 启用 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 两个架构各自构建、各自冒烟通过后，才在这里合成多架构清单并打标签，
+      # 因此任何架构失败都不会产生可见的可用标签
+      - name: 合并双架构清单
+        id: manifest
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAGS: ${{ inputs.tags }}
+          DIGEST_AMD64: ${{ inputs.digest_amd64 }}
+          DIGEST_ARM64: ${{ inputs.digest_arm64 }}
+        run: |
+          set -euo pipefail
+          args=()
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          for t in "${TAG_LIST[@]}"; do
+            args+=(--tag "$t")
+          done
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.title=AstrBot Extended" \
+            --annotation "index:org.opencontainers.image.description=AstrBot with extra Python dependencies (faiss/numpy/pandas/scikit-learn/lightrag/mem0)" \
+            --annotation "index:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
+            --annotation "index:org.opencontainers.image.licenses=AGPL-3.0" \
+            "${args[@]}" \
+            "$IMAGE_NAME@$DIGEST_AMD64" \
+            "$IMAGE_NAME@$DIGEST_ARM64"
+          echo "primary=${TAG_LIST[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: 同步镜像清单到 Docker Hub
+        id: hub
+        if: env.DOCKERHUB_USERNAME != ''
+        env:
+          TAGS: ${{ inputs.tags }}
+          DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO }}
+        run: |
+          set -euo pipefail
+          repo="$DOCKERHUB_REPO"
+          if [ -z "$repo" ]; then
+            repo="${GITHUB_REPOSITORY##*/}"
+          fi
+          hub_name="$(echo "$DOCKERHUB_USERNAME/$repo" | tr '[:upper:]' '[:lower:]')"
+          hub_image="docker.io/$hub_name"
+
+          args=()
+          IFS=',' read -ra TAG_LIST <<< "$TAGS"
+          for t in "${TAG_LIST[@]}"; do
+            args+=(--tag "$hub_image:${t##*:}")
+          done
+          # 复用 GHCR 已推送的 manifest list，避免二次构建
+          docker buildx imagetools create "${args[@]}" "${TAG_LIST[0]}"
+          echo "primary=$hub_image:${TAG_LIST[0]##*:}" >> "$GITHUB_OUTPUT"
+
+      - name: 校验镜像清单
+        env:
+          PRIMARY: ${{ steps.manifest.outputs.primary }}
+          HUB_PRIMARY: ${{ steps.hub.outputs.primary }}
+        run: |
+          set -euo pipefail
+          echo "--- GHCR ---"
+          docker buildx imagetools inspect "$PRIMARY"
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            echo "--- Docker Hub ---"
+            docker buildx imagetools inspect "$HUB_PRIMARY"
+          fi

@@ -1,0 +1,154 @@
+name: Sync Upstream Base Image
+
+on:
+  schedule:
+    # 每 6 小时检查一次上游 soulter/astrbot 的 latest 与 nightly-latest
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制重新跟随最新上游（忽略当前锁定版本）'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: soulter/astrbot
+
+jobs:
+  # 两个上游通道各自独立检测，互不影响
+  detect-latest:
+    name: 检测上游 latest 通道
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      base: ${{ steps.detect.outputs.base }}
+      digest: ${{ steps.detect.outputs.digest }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 查询并对比
+        id: detect
+        uses: ./.github/actions/detect-upstream/action.yml
+        with:
+          channel: latest
+          repo: ${{ env.UPSTREAM_REPO }}
+          lock_file: '.upstream/latest.lock'
+          force: ${{ inputs.force }}
+
+  detect-nightly-latest:
+    name: 检测上游 nightly-latest 通道
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      base: ${{ steps.detect.outputs.base }}
+      digest: ${{ steps.detect.outputs.digest }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 查询并对比
+        id: detect
+        uses: ./.github/actions/detect-upstream/action.yml
+        with:
+          channel: nightly-latest
+          repo: ${{ env.UPSTREAM_REPO }}
+          lock_file: '.upstream/nightly-latest.lock'
+          force: ${{ inputs.force }}
+
+  # 先发候选标签（不含 latest），验证通过后再由通道内的提升步骤创建正式标签
+  build-stable:
+    name: 构建稳定通道
+    needs: [detect-latest]
+    if: needs.detect-latest.outputs.changed == 'true'
+    uses: ./.github/workflows/channel-stable.yml
+    with:
+      base_image: ${{ needs.detect-latest.outputs.base }}
+      publish_latest: false
+      promote: true
+      run_smoke_test: true
+    secrets: inherit
+
+  build-nightly:
+    name: 构建 nightly 通道
+    needs: [detect-nightly-latest]
+    if: needs.detect-nightly-latest.outputs.changed == 'true'
+    uses: ./.github/workflows/channel-nightly.yml
+    with:
+      base_image: ${{ needs.detect-nightly-latest.outputs.base }}
+      publish_latest: false
+      promote: true
+      run_smoke_test: true
+    secrets: inherit
+
+  # 两个通道的锁定文件统一在一次提交里更新，避免并发推送互相冲突
+  commit:
+    name: 更新上游锁定文件
+    needs: [detect-latest, detect-nightly-latest, build-stable, build-nightly]
+    if: always() && (needs.detect-latest.result == 'success' || needs.detect-nightly-latest.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: 写入已成功通道的锁定信息
+        env:
+          CHANGED_LATEST: ${{ needs.detect-latest.outputs.changed }}
+          CHANGED_NIGHTLY: ${{ needs.detect-nightly-latest.outputs.changed }}
+          BUILD_LATEST: ${{ needs.build-stable.result }}
+          BUILD_NIGHTLY: ${{ needs.build-nightly.result }}
+          BASE_LATEST: ${{ needs.detect-latest.outputs.base }}
+          BASE_NIGHTLY: ${{ needs.detect-nightly-latest.outputs.base }}
+        run: |
+          set -euo pipefail
+          mkdir -p .upstream
+          write_lock() {
+            local file="$1" base="$2"
+            local extra=""
+            # 先读出旧文件里的补充注释（如对应上游版本），再覆写，避免重定向先清空文件
+            if [ -f "$file" ]; then
+              extra="$(grep -E '^#' "$file" | grep -vE '^# (上游基础镜像锁定信息|由 |格式：)' || true)"
+            fi
+            {
+              echo "# 上游基础镜像锁定信息"
+              echo "# 由 .github/workflows/sync-upstream.yml 自动检测并更新，请勿手工编辑"
+              echo "# 格式：<镜像引用>@<digest>"
+              if [ -n "$extra" ]; then
+                echo "$extra"
+              fi
+              echo "$base"
+            } > "$file"
+          }
+
+          if [ "$CHANGED_LATEST" = "true" ] && [ "$BUILD_LATEST" = "success" ]; then
+            write_lock ".upstream/latest.lock" "$BASE_LATEST"
+            echo "- 已更新 \`.upstream/latest.lock\` → \`$BASE_LATEST\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$CHANGED_NIGHTLY" = "true" ] && [ "$BUILD_NIGHTLY" = "success" ]; then
+            write_lock ".upstream/nightly-latest.lock" "$BASE_NIGHTLY"
+            echo "- 已更新 \`.upstream/nightly-latest.lock\` → \`$BASE_NIGHTLY\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 提交锁定文件
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .upstream
+          if git diff --cached --quiet; then
+            echo "锁定文件无变化，跳过提交"
+            exit 0
+          fi
+          git commit -m "chore(deps): 跟随上游 astrbot 镜像更新"
+          git push origin "HEAD:$GITHUB_REF_NAME"

@@ -1,0 +1,48 @@
+name: 依赖冒烟测试
+description: 对指定镜像执行核心依赖（硬门禁）与可选依赖（软告警）导入检查
+
+inputs:
+  image:
+    description: 待测镜像引用（标签或 digest 引用）
+    required: true
+  platform:
+    description: 目标平台
+    required: true
+  pull:
+    description: 是否先拉取镜像；本地构建产物填 false
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: 拉取待测镜像
+      if: inputs.pull == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        docker pull --platform "$PLATFORM" "$IMAGE"
+
+    - name: 冒烟测试 - 核心依赖（硬门禁）
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        docker run --rm --platform "$PLATFORM" --entrypoint python "$IMAGE" \
+          -c "import faiss, numpy, pandas, sklearn, quart, sqlalchemy, fastapi, uvicorn; print('core deps ok')"
+
+    - name: 冒烟测试 - 可选依赖（失败不阻断）
+      shell: bash
+      continue-on-error: true
+      env:
+        IMAGE: ${{ inputs.image }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        docker run --rm --platform "$PLATFORM" --entrypoint python "$IMAGE" \
+          -c "import lightrag, mem0, apscheduler, aiohttp, networkx; print('extra deps ok')"

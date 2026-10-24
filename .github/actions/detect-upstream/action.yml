@@ -1,0 +1,77 @@
+name: 检测上游镜像更新
+description: 查询上游镜像的 manifest index digest，并与本地锁定文件比较判断是否需要重建
+
+inputs:
+  channel:
+    description: 上游通道标签（latest / nightly-latest）
+    required: true
+  repo:
+    description: 上游镜像仓库
+    required: false
+    default: 'soulter/astrbot'
+  lock_file:
+    description: 该通道对应的锁定文件路径
+    required: false
+    default: '.upstream/latest.lock'
+  force:
+    description: 是否强制视为有更新（忽略当前锁定版本）
+    required: false
+    default: 'false'
+
+outputs:
+  digest:
+    description: 上游 manifest index 的 digest
+    value: ${{ steps.check.outputs.digest }}
+  base:
+    description: 上游镜像引用（repo@digest）
+    value: ${{ steps.check.outputs.base }}
+  changed:
+    description: 是否需要重建（true / false）
+    value: ${{ steps.check.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    - name: 查询并对比
+      id: check
+      shell: bash
+      env:
+        CHANNEL: ${{ inputs.channel }}
+        UPSTREAM_REPO: ${{ inputs.repo }}
+        LOCK_FILE: ${{ inputs.lock_file }}
+        FORCE: ${{ inputs.force }}
+      run: |
+        set -euo pipefail
+        token="$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${UPSTREAM_REPO}:pull" | jq -r .token)"
+        if [ -z "$token" ] || [ "$token" = "null" ]; then
+          echo "::error::获取 Docker Hub token 失败"
+          exit 1
+        fi
+
+        # 取 manifest index 的 digest（多架构），amd64/arm64 都能基于它构建
+        digest="$(curl -fsSL -D - -o /dev/null \
+          -H "Authorization: Bearer $token" \
+          -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+          "https://registry-1.docker.io/v2/${UPSTREAM_REPO}/manifests/${CHANNEL}" \
+          | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{d=$2} END{print d}')"
+        if [ -z "$digest" ]; then
+          echo "::error::未能获取上游 ${CHANNEL} 的 digest"
+          exit 1
+        fi
+
+        locked=""
+        if [ -f "$LOCK_FILE" ]; then
+          locked="$(grep -oE '[a-zA-Z0-9._/-]+@sha256:[a-f0-9]{64}' "$LOCK_FILE" | head -1 || true)"
+        fi
+
+        base="${UPSTREAM_REPO}@${digest}"
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        echo "base=$base" >> "$GITHUB_OUTPUT"
+
+        if [ "$FORCE" = "true" ] || [ "$locked" != "$base" ]; then
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "- **${CHANNEL}**: \`${locked:-（无）}\` → \`$base\`" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          echo "- ${CHANNEL}: 无更新（\`$base\`）" >> "$GITHUB_STEP_SUMMARY"
+        fi

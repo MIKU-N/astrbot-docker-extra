@@ -1,0 +1,135 @@
+name: 稳定通道发布
+
+on:
+  workflow_call:
+    inputs:
+      base_image:
+        description: 锁定的基础镜像引用；留空则读取锁定文件
+        required: false
+        type: string
+        default: ''
+      lock_file:
+        description: 基础镜像锁定文件路径
+        required: false
+        type: string
+        default: '.upstream/latest.lock'
+      publish_latest:
+        description: 是否直接发布 latest 标签；false 则只发候选标签，由提升步骤在验证通过后创建
+        required: false
+        type: boolean
+        default: true
+      promote:
+        description: 是否在发布后把候选标签提升为 latest
+        required: false
+        type: boolean
+        default: false
+      run_smoke_test:
+        description: 是否执行依赖冒烟测试
+        required: false
+        type: boolean
+        default: true
+      image_tag:
+        description: 手动指定镜像标签；留空则按分支/SHA 自动生成
+        required: false
+        type: string
+        default: ''
+    outputs:
+      primary:
+        description: 主标签完整引用
+        value: ${{ jobs.tags.outputs.primary }}
+      ghcr_image:
+        description: GHCR 镜像名
+        value: ${{ jobs.tags.outputs.ghcr }}
+
+jobs:
+  tags:
+    name: 计算标签集
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.tagset.outputs.tags }}
+      primary: ${{ steps.tagset.outputs.primary }}
+      primary_tag: ${{ steps.tagset.outputs.primary_tag }}
+      ghcr: ${{ steps.names.outputs.ghcr }}
+    steps:
+      - name: 解析镜像名
+        id: names
+        run: |
+          set -euo pipefail
+          ghcr_name="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "ghcr=ghcr.io/$ghcr_name" >> "$GITHUB_OUTPUT"
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.ghcr }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
+
+      # 稳定通道没有标签前缀，latest 直接参与发布
+      - name: 计算最终标签集
+        id: tagset
+        uses: ./.github/actions/compute-tag-set/action.yml
+        with:
+          all_tags: ${{ steps.meta.outputs.tags }}
+          prefix: ''
+          publish_latest: ${{ inputs.publish_latest }}
+          latest_tag: 'latest'
+
+  build-amd64:
+    name: 构建 amd64
+    needs: [tags]
+    uses: ./.github/workflows/reusable-build-arch.yml
+    with:
+      arch: amd64
+      platform: linux/amd64
+      image_name: ${{ needs.tags.outputs.ghcr }}
+      base_image: ${{ inputs.base_image }}
+      lock_file: ${{ inputs.lock_file }}
+      publish: true
+      run_smoke_test: ${{ inputs.run_smoke_test }}
+      cache_scope: stable-amd64
+    secrets: inherit
+
+  build-arm64:
+    name: 构建 arm64
+    needs: [tags]
+    uses: ./.github/workflows/reusable-build-arch.yml
+    with:
+      arch: arm64
+      platform: linux/arm64
+      image_name: ${{ needs.tags.outputs.ghcr }}
+      base_image: ${{ inputs.base_image }}
+      lock_file: ${{ inputs.lock_file }}
+      publish: true
+      run_smoke_test: ${{ inputs.run_smoke_test }}
+      cache_scope: stable-arm64
+    secrets: inherit
+
+  publish:
+    name: 合并清单并发布
+    needs: [tags, build-amd64, build-arm64]
+    uses: ./.github/workflows/reusable-publish.yml
+    with:
+      image_name: ${{ needs.tags.outputs.ghcr }}
+      tags: ${{ needs.tags.outputs.tags }}
+      digest_amd64: ${{ needs.build-amd64.outputs.digest }}
+      digest_arm64: ${{ needs.build-arm64.outputs.digest }}
+    secrets: inherit
+
+  promote:
+    name: 提升 latest
+    needs: [tags, publish]
+    if: inputs.promote
+    uses: ./.github/workflows/reusable-promote.yml
+    with:
+      image_name: ${{ needs.tags.outputs.ghcr }}
+      source_tag: ${{ needs.tags.outputs.primary_tag }}
+      target_tag: 'latest'
+    secrets: inherit

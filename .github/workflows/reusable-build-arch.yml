@@ -1,0 +1,139 @@
+name: 单架构构建
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: 架构标识（amd64 / arm64），用于缓存作用域与本地镜像名
+        required: true
+        type: string
+      platform:
+        description: 目标平台
+        required: true
+        type: string
+      image_name:
+        description: 推送目标镜像名；publish=true 时必填
+        required: false
+        type: string
+        default: ''
+      base_image:
+        description: 显式指定的基础镜像；留空则读取锁定文件
+        required: false
+        type: string
+        default: ''
+      lock_file:
+        description: 基础镜像锁定文件路径
+        required: false
+        type: string
+        default: '.upstream/latest.lock'
+      publish:
+        description: 是否推送到镜像仓库；true=按 digest 推送，false=仅本地构建供测试
+        required: false
+        type: boolean
+        default: false
+      run_smoke_test:
+        description: 是否执行依赖冒烟测试
+        required: false
+        type: boolean
+        default: true
+      cache_scope:
+        description: BuildKit 缓存作用域（按「通道+架构」隔离）
+        required: true
+        type: string
+    outputs:
+      digest:
+        description: 推送后的镜像 digest；未推送时为空
+        value: ${{ jobs.build.outputs.digest }}
+      base_image:
+        description: 实际使用的基础镜像
+        value: ${{ jobs.build.outputs.base_image }}
+
+jobs:
+  build:
+    name: 构建 ${{ inputs.arch }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      base_image: ${{ steps.base.outputs.image }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 解析基础镜像
+        id: base
+        uses: ./.github/actions/resolve-base-image/action.yml
+        with:
+          base_image: ${{ inputs.base_image }}
+          lock_file: ${{ inputs.lock_file }}
+
+      - name: 登录 GHCR
+        if: inputs.publish
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 启用 QEMU 模拟（arm64）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 启用 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 发布路径：按 digest 推送单架构镜像，由合并步骤统一生成多架构清单。
+      # 这样每个架构可以独立构建、独立冒烟、独立失败，不会互相阻塞。
+      - name: 构建并按 digest 推送
+        id: push
+        if: inputs.publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platform }}
+          outputs: type=image,name=${{ inputs.image_name }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.image }}
+          labels: |
+            org.opencontainers.image.title=AstrBot Extended
+            org.opencontainers.image.description=AstrBot with extra Python dependencies (faiss/numpy/pandas/scikit-learn/lightrag/mem0)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0
+            org.opencontainers.image.base.name=${{ steps.base.outputs.image }}
+          cache-from: type=gha,scope=${{ inputs.cache_scope }}
+          cache-to: type=gha,scope=${{ inputs.cache_scope }},mode=max
+
+      # 校验路径（PR / 手工预检）：只在本机构建，不接触任何镜像仓库
+      - name: 本地构建（不推送）
+        id: local
+        if: ${{ !inputs.publish }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platform }}
+          load: true
+          tags: astrbot-${{ inputs.arch }}:local
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.image }}
+          labels: |
+            org.opencontainers.image.title=AstrBot Extended
+            org.opencontainers.image.description=AstrBot with extra Python dependencies (faiss/numpy/pandas/scikit-learn/lightrag/mem0)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0
+            org.opencontainers.image.base.name=${{ steps.base.outputs.image }}
+          cache-from: type=gha,scope=${{ inputs.cache_scope }}
+          cache-to: type=gha,scope=${{ inputs.cache_scope }},mode=max
+
+      - name: 冒烟测试
+        if: inputs.run_smoke_test
+        uses: ./.github/actions/smoke-test/action.yml
+        with:
+          image: ${{ inputs.publish && format('{0}@{1}', inputs.image_name, steps.push.outputs.digest) || format('astrbot-{0}:local', inputs.arch) }}
+          platform: ${{ inputs.platform }}
+          pull: ${{ inputs.publish }}

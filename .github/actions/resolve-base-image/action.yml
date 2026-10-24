@@ -1,0 +1,46 @@
+name: 解析基础镜像
+description: 按「显式输入 → 锁定文件 → 默认镜像」的顺序确定构建使用的基础镜像
+
+inputs:
+  base_image:
+    description: 显式指定的基础镜像引用；留空则读取锁定文件
+    required: false
+    default: ''
+  lock_file:
+    description: 基础镜像锁定文件路径
+    required: false
+    default: '.upstream/latest.lock'
+  fallback:
+    description: 以上都没有来源时使用的默认镜像
+    required: false
+    default: 'soulter/astrbot:latest'
+
+outputs:
+  image:
+    description: 最终使用的基础镜像引用
+    value: ${{ steps.resolve.outputs.image }}
+
+runs:
+  using: composite
+  steps:
+    - name: 解析基础镜像
+      id: resolve
+      shell: bash
+      env:
+        INPUT_BASE: ${{ inputs.base_image }}
+        LOCK_FILE: ${{ inputs.lock_file }}
+        FALLBACK: ${{ inputs.fallback }}
+      run: |
+        set -euo pipefail
+        image="$INPUT_BASE"
+        if [ -z "$image" ] && [ -f "$LOCK_FILE" ]; then
+          locked="$(grep -oE '[a-zA-Z0-9._/-]+@sha256:[a-f0-9]{64}' "$LOCK_FILE" | head -1 || true)"
+          if [ -n "$locked" ]; then
+            image="$locked"
+          fi
+        fi
+        if [ -z "$image" ]; then
+          image="$FALLBACK"
+        fi
+        echo "image=$image" >> "$GITHUB_OUTPUT"
+        echo "- 基础镜像: \`$image\`" >> "$GITHUB_STEP_SUMMARY"
