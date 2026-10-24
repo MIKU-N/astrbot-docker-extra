@@ -60,7 +60,7 @@ jobs:
       base_image: ${{ steps.base.outputs.image }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 解析基础镜像
         id: base

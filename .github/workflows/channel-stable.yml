@@ -53,7 +53,7 @@ jobs:
     steps:
       # 本地 composite action 需要仓库文件，必须先检出代码
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 解析镜像名
         id: names
@@ -64,7 +64,7 @@ jobs:
 
       - name: 生成镜像标签
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.names.outputs.ghcr }}
           tags: |
