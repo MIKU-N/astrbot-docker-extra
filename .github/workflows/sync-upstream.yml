@@ -67,9 +67,13 @@ jobs:
     name: 构建稳定通道
     needs: [detect-latest]
     if: needs.detect-latest.outputs.changed == 'true'
-    uses: ./.github/workflows/channel-stable.yml
+    uses: ./.github/workflows/channel.yml
     with:
       base_image: ${{ needs.detect-latest.outputs.base }}
+      lock_file: '.upstream/latest.lock'
+      prefix: ''
+      latest_tag: 'latest'
+      cache_scope_prefix: 'stable'
       publish_latest: false
       promote: true
       run_smoke_test: true
@@ -79,9 +83,13 @@ jobs:
     name: 构建 nightly 通道
     needs: [detect-nightly-latest]
     if: needs.detect-nightly-latest.outputs.changed == 'true'
-    uses: ./.github/workflows/channel-nightly.yml
+    uses: ./.github/workflows/channel.yml
     with:
       base_image: ${{ needs.detect-nightly-latest.outputs.base }}
+      lock_file: '.upstream/nightly-latest.lock'
+      prefix: 'nightly-'
+      latest_tag: 'nightly-latest'
+      cache_scope_prefix: 'nightly'
       publish_latest: false
       promote: true
       run_smoke_test: true

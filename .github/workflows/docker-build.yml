@@ -23,17 +23,24 @@ jobs:
   pr-verify:
     name: PR 校验（amd64）
     if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    uses: ./.github/workflows/reusable-build-arch.yml
-    with:
-      arch: amd64
-      platform: linux/amd64
-      lock_file: '.upstream/latest.lock'
-      publish: false
-      run_smoke_test: true
-      cache_scope: stable-amd64
-    secrets: inherit
+    steps:
+      # 本地复合 Action 必须先有工作区内容，检出代码要放在调用它的步骤之前
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 构建并冒烟（amd64）
+        uses: ./.github/actions/build-arch
+        with:
+          arch: amd64
+          platform: linux/amd64
+          lock_file: '.upstream/latest.lock'
+          publish: 'false'
+          run_smoke_test: 'true'
+          cache_scope: stable-amd64
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   # 重建门禁：只有构建输入真的变了才出镜像，避免每次提交都重复发布新版本
   gate:
@@ -103,8 +110,12 @@ jobs:
     name: 发布稳定通道
     needs: [gate]
     if: needs.gate.outputs.should_build == 'true'
-    uses: ./.github/workflows/channel-stable.yml
+    uses: ./.github/workflows/channel.yml
     with:
+      lock_file: '.upstream/latest.lock'
+      prefix: ''
+      latest_tag: 'latest'
+      cache_scope_prefix: 'stable'
       publish_latest: true
       promote: false
       run_smoke_test: true

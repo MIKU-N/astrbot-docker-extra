@@ -1,0 +1,76 @@
+name: 提升发布标签
+description: 把候选标签提升为通道的正式标签（latest / nightly-latest）
+
+inputs:
+  image_name:
+    description: GHCR 镜像名
+    required: true
+  source_tag:
+    description: 候选标签名（不含镜像名）
+    required: true
+  target_tag:
+    description: 目标标签名（不含镜像名）
+    required: true
+  github_token:
+    description: 登录 GHCR 用的 GITHUB_TOKEN
+    required: false
+    default: ''
+  dockerhub_username:
+    description: Docker Hub 用户名；留空则跳过 Docker Hub 同步
+    required: false
+    default: ''
+  dockerhub_token:
+    description: Docker Hub Access Token
+    required: false
+    default: ''
+  dockerhub_repo:
+    description: Docker Hub 仓库名；留空则取当前仓库名
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: 登录 GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github_token }}
+
+    - name: 登录 Docker Hub
+      if: inputs.dockerhub_username != ''
+      uses: docker/login-action@v3
+      with:
+        username: ${{ inputs.dockerhub_username }}
+        password: ${{ inputs.dockerhub_token }}
+
+    - name: 启用 Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # 仅在构建与冒烟全部通过后调用，把候选标签提升为通道的正式标签
+    - name: 提升标签
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image_name }}
+        SOURCE_TAG: ${{ inputs.source_tag }}
+        TARGET_TAG: ${{ inputs.target_tag }}
+        DOCKERHUB_USERNAME: ${{ inputs.dockerhub_username }}
+        DOCKERHUB_REPO: ${{ inputs.dockerhub_repo }}
+      run: |
+        set -euo pipefail
+        source_ref="$IMAGE_NAME:$SOURCE_TAG"
+        target_ref="$IMAGE_NAME:$TARGET_TAG"
+        docker buildx imagetools create --tag "$target_ref" "$source_ref"
+        echo "- 已提升 \`$target_ref\` → \`$source_ref\`" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ -n "$DOCKERHUB_USERNAME" ]; then
+          repo="$DOCKERHUB_REPO"
+          if [ -z "$repo" ]; then
+            repo="${GITHUB_REPOSITORY##*/}"
+          fi
+          hub_name="$(echo "$DOCKERHUB_USERNAME/$repo" | tr '[:upper:]' '[:lower:]')"
+          hub_image="docker.io/$hub_name"
+          docker buildx imagetools create --tag "$hub_image:$TARGET_TAG" "$source_ref"
+          echo "- 已提升 \`$hub_image:$TARGET_TAG\` → \`$source_ref\`" >> "$GITHUB_STEP_SUMMARY"
+        fi

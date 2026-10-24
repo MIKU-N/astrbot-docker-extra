@@ -118,20 +118,25 @@ services:
 .github/workflows/
 ├── docker-build.yml          # 入口：push / PR / 手动触发
 ├── sync-upstream.yml         # 入口：定时检测上游镜像更新
-├── channel-stable.yml        # 稳定通道：标签策略 + 锁文件 + 提升目标
-├── channel-nightly.yml       # nightly 通道：nightly- 前缀 + 锁文件 + 提升目标
-├── reusable-build-arch.yml   # 单架构构建 + 该架构的冒烟测试
-├── reusable-publish.yml      # 合并双架构清单 + Docker Hub 同步 + 校验
-└── reusable-promote.yml      # 候选标签 → latest / nightly-latest
-.github/actions/              # 四个复合 Action：基础镜像解析 / 标签集计算 / 冒烟测试 / 上游检测
+└── channel.yml               # 可复用：按通道参数化的发布流程（stable / nightly 同一份实现）
+.github/actions/
+├── build-arch/               # 单架构构建 + 该架构的冒烟测试
+├── publish/                  # 合并双架构清单 + Docker Hub 同步 + 校验
+├── promote/                  # 候选标签 → latest / nightly-latest
+├── compute-tag-set/          # 标签集计算（通道前缀 + latest 处理）
+├── resolve-base-image/       # 基础镜像解析（输入 → 锁定文件 → 默认值）
+├── smoke-test/               # 依赖冒烟测试
+└── detect-upstream/          # 上游镜像 digest 检测
 ```
+
+> 只有 `on: workflow_call` 的可复用 workflow 必须放在 `.github/workflows/` 顶层（GitHub 不支持其子目录），因此 Actions 页面里会出现 `channel.yml` 这一条——它没有独立运行记录是正常的，执行记录以子 job 形式出现在调用它的入口 run 里。其余复用逻辑都收在 `.github/actions/` 的复合 Action 中，不会出现在 Actions 页面。
 
 几个设计要点：
 
 - **架构分离**：`amd64` 与 `arm64` 是两个独立 job、两个独立 runner、两个独立缓存作用域（`stable-amd64` / `stable-arm64` / `nightly-amd64` / `nightly-arm64`），各自构建、各自冒烟、各自失败互不阻塞。
 - **先验证后打标签**：每个架构先按 digest 推送并完成冒烟测试，全部通过后才由合并步骤生成多架构清单。因此任何一个架构出问题，都不会产生可见的坏标签。
-- **版本分离**：stable 与 nightly 是两个独立文件，标签前缀、锁文件、提升目标都是写死的字面量，而不是靠一个开关字符串区分。
-- **上游自动跟随**：每 6 小时检查一次上游 `latest` 与 `nightly-latest`，有更新时按通道构建，并把新的 digest 写回 [`.upstream/`](.upstream) 下的锁文件。
+- **通道参数化**：stable 与 nightly 共用 `channel.yml`，差异全部通过输入表达（`lock_file` / `prefix` / `latest_tag` / `cache_scope_prefix`），调用处一眼可辨，避免两份文件各自漂移。
+- **上游自动跟随**：每小时检查一次上游 `latest` 与 `nightly-latest`，有更新时按通道构建，并把新的 digest 写回 [`.upstream/`](.upstream) 下的锁文件。
 - **重建门禁**：push 到 main 时先比对构建输入（`Dockerfile`、依赖清单、上游锁文件、`.github/`），**没有变化就跳过镜像构建**，避免每次提交都重复发布一个内容相同的新版本。手动触发（workflow_dispatch）始终构建。上游镜像更新由 `sync-upstream.yml` 负责：它用新 digest 构建并提升 `latest`，随后提交的锁文件带 `[skip ci]` 标记，不再重复构建同一个镜像。
 
 ### 所需密钥与变量

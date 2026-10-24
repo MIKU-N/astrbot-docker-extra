@@ -1,0 +1,208 @@
+name: 通道发布
+
+on:
+  workflow_call:
+    inputs:
+      base_image:
+        description: 锁定的基础镜像引用；留空则读取锁定文件
+        required: false
+        type: string
+        default: ''
+      lock_file:
+        description: 基础镜像锁定文件路径
+        required: false
+        type: string
+        default: '.upstream/latest.lock'
+      prefix:
+        description: 通道标签前缀；稳定通道留空，nightly 通道填 nightly-
+        required: false
+        type: string
+        default: ''
+      latest_tag:
+        description: 该通道的正式标签名（稳定通道 latest，nightly 通道 nightly-latest）
+        required: false
+        type: string
+        default: 'latest'
+      cache_scope_prefix:
+        description: BuildKit 缓存作用域前缀（稳定通道 stable，nightly 通道 nightly）
+        required: false
+        type: string
+        default: 'stable'
+      publish_latest:
+        description: 是否直接发布正式标签；false 则只发候选标签，由提升步骤在验证通过后创建
+        required: false
+        type: boolean
+        default: true
+      promote:
+        description: 是否在发布后把候选标签提升为正式标签
+        required: false
+        type: boolean
+        default: false
+      run_smoke_test:
+        description: 是否执行依赖冒烟测试
+        required: false
+        type: boolean
+        default: true
+      image_tag:
+        description: 手动指定镜像标签；留空则按分支/SHA 自动生成
+        required: false
+        type: string
+        default: ''
+    outputs:
+      primary:
+        description: 主标签完整引用
+        value: ${{ jobs.tags.outputs.primary }}
+      ghcr_image:
+        description: GHCR 镜像名
+        value: ${{ jobs.tags.outputs.ghcr }}
+
+jobs:
+  tags:
+    name: 计算标签集
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.tagset.outputs.tags }}
+      primary: ${{ steps.tagset.outputs.primary }}
+      primary_tag: ${{ steps.tagset.outputs.primary_tag }}
+      ghcr: ${{ steps.names.outputs.ghcr }}
+    steps:
+      # 本地 composite action 需要仓库文件，必须先检出代码
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 解析镜像名
+        id: names
+        run: |
+          set -euo pipefail
+          ghcr_name="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "ghcr=ghcr.io/$ghcr_name" >> "$GITHUB_OUTPUT"
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.names.outputs.ghcr }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
+
+      # 通道前缀由输入决定：nightly 通道所有标签统一加 nightly- 前缀，与稳定通道完全隔离
+      - name: 计算最终标签集
+        id: tagset
+        uses: ./.github/actions/compute-tag-set
+        with:
+          all_tags: ${{ steps.meta.outputs.tags }}
+          prefix: ${{ inputs.prefix }}
+          publish_latest: ${{ inputs.publish_latest }}
+          latest_tag: ${{ inputs.latest_tag }}
+
+  build-amd64:
+    name: 构建 amd64
+    needs: [tags]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      # 本地复合 Action 必须先有工作区内容，检出代码要放在调用它的步骤之前
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 构建并推送 amd64
+        id: build
+        uses: ./.github/actions/build-arch
+        with:
+          arch: amd64
+          platform: linux/amd64
+          image_name: ${{ needs.tags.outputs.ghcr }}
+          base_image: ${{ inputs.base_image }}
+          lock_file: ${{ inputs.lock_file }}
+          publish: 'true'
+          run_smoke_test: ${{ inputs.run_smoke_test }}
+          cache_scope: ${{ inputs.cache_scope_prefix }}-amd64
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-arm64:
+    name: 构建 arm64
+    needs: [tags]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 构建并推送 arm64
+        id: build
+        uses: ./.github/actions/build-arch
+        with:
+          arch: arm64
+          platform: linux/arm64
+          image_name: ${{ needs.tags.outputs.ghcr }}
+          base_image: ${{ inputs.base_image }}
+          lock_file: ${{ inputs.lock_file }}
+          publish: 'true'
+          run_smoke_test: ${{ inputs.run_smoke_test }}
+          cache_scope: ${{ inputs.cache_scope_prefix }}-arm64
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    name: 合并清单并发布
+    needs: [tags, build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      primary: ${{ steps.publish.outputs.primary }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 合并并发布
+        id: publish
+        uses: ./.github/actions/publish
+        with:
+          image_name: ${{ needs.tags.outputs.ghcr }}
+          tags: ${{ needs.tags.outputs.tags }}
+          digest_amd64: ${{ needs.build-amd64.outputs.digest }}
+          digest_arm64: ${{ needs.build-arm64.outputs.digest }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKER_USERNAME }}
+          dockerhub_token: ${{ secrets.DOCKER_PASSWORD }}
+          dockerhub_repo: ${{ vars.DOCKERHUB_REPO }}
+
+  promote:
+    name: 提升 ${{ inputs.latest_tag }}
+    needs: [tags, publish]
+    if: inputs.promote
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 提升标签
+        uses: ./.github/actions/promote
+        with:
+          image_name: ${{ needs.tags.outputs.ghcr }}
+          source_tag: ${{ needs.tags.outputs.primary_tag }}
+          target_tag: ${{ inputs.latest_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKER_USERNAME }}
+          dockerhub_token: ${{ secrets.DOCKER_PASSWORD }}
+          dockerhub_repo: ${{ vars.DOCKERHUB_REPO }}
