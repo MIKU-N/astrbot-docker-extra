@@ -3,4 +3,4 @@
 # 格式：<镜像引用>@<digest>
 #
 # 对应上游版本：v4.29.1（soulter/astrbot:latest）
-soulter/astrbot@sha256:a140a326163ac5f82f62153f033cddeac74e38e4ee1809c6e333e950ff19edc4
+soulter/astrbot@sha256:1fe5c90c56aa4158e887431dbbf67d619bb819c5042dbdcf5df8d7f03d9579a7
