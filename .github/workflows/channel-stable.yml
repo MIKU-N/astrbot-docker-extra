@@ -51,6 +51,10 @@ jobs:
       primary_tag: ${{ steps.tagset.outputs.primary_tag }}
       ghcr: ${{ steps.names.outputs.ghcr }}
     steps:
+      # 本地 composite action 需要仓库文件，必须先检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+
       - name: 解析镜像名
         id: names
         run: |
