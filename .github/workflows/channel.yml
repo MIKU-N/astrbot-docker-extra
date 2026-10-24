@@ -185,7 +185,9 @@ jobs:
           dockerhub_repo: ${{ vars.DOCKERHUB_REPO }}
 
   promote:
-    name: 提升 ${{ inputs.latest_tag }}
+    # 注意：可复用 workflow 的 job name 不会对 inputs 做插值，这里用静态名称，
+    # 实际提升的标签名会写进步骤摘要
+    name: 提升正式标签
     needs: [tags, publish]
     if: inputs.promote
     runs-on: ubuntu-latest
