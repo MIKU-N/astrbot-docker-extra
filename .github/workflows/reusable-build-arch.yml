@@ -64,7 +64,7 @@ jobs:
 
       - name: 解析基础镜像
         id: base
-        uses: ./.github/actions/resolve-base-image/action.yml
+        uses: ./.github/actions/resolve-base-image
         with:
           base_image: ${{ inputs.base_image }}
           lock_file: ${{ inputs.lock_file }}
@@ -131,7 +131,7 @@ jobs:
 
       - name: 冒烟测试
         if: inputs.run_smoke_test
-        uses: ./.github/actions/smoke-test/action.yml
+        uses: ./.github/actions/smoke-test
         with:
           image: ${{ inputs.publish && format('{0}@{1}', inputs.image_name, steps.push.outputs.digest) || format('astrbot-{0}:local', inputs.arch) }}
           platform: ${{ inputs.platform }}

@@ -79,7 +79,7 @@ jobs:
       # 稳定通道没有标签前缀，latest 直接参与发布
       - name: 计算最终标签集
         id: tagset
-        uses: ./.github/actions/compute-tag-set/action.yml
+        uses: ./.github/actions/compute-tag-set
         with:
           all_tags: ${{ steps.meta.outputs.tags }}
           prefix: ''

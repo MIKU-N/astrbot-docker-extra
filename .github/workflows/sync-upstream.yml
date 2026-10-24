@@ -35,7 +35,7 @@ jobs:
 
       - name: 查询并对比
         id: detect
-        uses: ./.github/actions/detect-upstream/action.yml
+        uses: ./.github/actions/detect-upstream
         with:
           channel: latest
           repo: ${{ env.UPSTREAM_REPO }}
@@ -55,7 +55,7 @@ jobs:
 
       - name: 查询并对比
         id: detect
-        uses: ./.github/actions/detect-upstream/action.yml
+        uses: ./.github/actions/detect-upstream
         with:
           channel: nightly-latest
           repo: ${{ env.UPSTREAM_REPO }}

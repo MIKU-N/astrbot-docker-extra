@@ -79,7 +79,7 @@ jobs:
       # nightly 通道所有标签统一加 nightly- 前缀，与稳定通道完全隔离
       - name: 计算最终标签集
         id: tagset
-        uses: ./.github/actions/compute-tag-set/action.yml
+        uses: ./.github/actions/compute-tag-set
         with:
           all_tags: ${{ steps.meta.outputs.tags }}
           prefix: 'nightly-'
