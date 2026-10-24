@@ -35,10 +35,74 @@ jobs:
       cache_scope: stable-amd64
     secrets: inherit
 
+  # 重建门禁：只有构建输入真的变了才出镜像，避免每次提交都重复发布新版本
+  gate:
+    name: 判断是否需要重建
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 判断构建输入是否变化
+        id: check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          # 手动触发视为显式要求重建
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "手动触发，执行完整构建。" >> "$GITHUB_STEP_SUMMARY"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          before="$BEFORE_SHA"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            before="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          # 基线提交取不到时按需重建处理，宁可多构建也不要漏构建
+          if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            echo "取不到基线提交 $before，按需重建处理。" >> "$GITHUB_STEP_SUMMARY"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 构建输入：镜像定义、依赖清单、上游锁定文件、工作流与复合 Action
+          changed="$(git diff --name-only "$before" HEAD -- \
+            Dockerfile \
+            astrbot-extra-requirements.txt \
+            .upstream \
+            .github)"
+
+          if [ -n "$changed" ]; then
+            {
+              echo "构建输入发生变化，执行重建："
+              echo '```'
+              echo "$changed"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "构建输入未变化（基础镜像锁定与依赖均无变动），跳过本次镜像构建。" >> "$GITHUB_STEP_SUMMARY"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # 正式发布：走稳定通道，amd64 与 arm64 各自构建冒烟后再合并清单
   release-stable:
     name: 发布稳定通道
-    if: github.event_name != 'pull_request'
+    needs: [gate]
+    if: needs.gate.outputs.should_build == 'true'
     uses: ./.github/workflows/channel-stable.yml
     with:
       publish_latest: true
@@ -49,12 +113,13 @@ jobs:
 
   summary:
     name: 写入构建摘要
-    needs: [pr-verify, release-stable]
-    if: always() && (needs.pr-verify.result == 'success' || needs.release-stable.result == 'success')
+    needs: [gate, pr-verify, release-stable]
+    if: always() && (needs.gate.result == 'success' || needs.pr-verify.result == 'success' || needs.release-stable.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: 汇总
         env:
+          GATE_RESULT: ${{ needs.gate.result }}
           PR_RESULT: ${{ needs.pr-verify.result }}
           RELEASE_RESULT: ${{ needs.release-stable.result }}
           PRIMARY: ${{ needs.release-stable.outputs.primary }}
@@ -65,6 +130,7 @@ jobs:
             echo ""
             echo "- 架构: \`linux/amd64, linux/arm64\`"
             echo "- 通道: \`stable\`"
+            echo "- 重建判定: \`$GATE_RESULT\`"
             echo "- PR 校验: \`$PR_RESULT\`"
             echo "- 发布结果: \`$RELEASE_RESULT\`"
             if [ -n "$PRIMARY" ]; then
