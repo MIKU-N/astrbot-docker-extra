@@ -3,7 +3,7 @@ description: 在 metadata-action 产出的标签基础上应用通道前缀，�
 
 inputs:
   all_tags:
-    description: metadata-action 输出的标签列表（逗号分隔）
+    description: metadata-action 输出的标签列表（每行一个完整镜像引用，也兼容逗号分隔）
     required: true
   prefix:
     description: 通道标签前缀；稳定通道留空，nightly 通道填 nightly-
@@ -48,36 +48,48 @@ runs:
         prefix="$PREFIX"
         latest_tag="$LATEST_TAG"
 
-        # 1) 通道前缀：nightly 通道的所有标签都变成 nightly-<tag>，与稳定通道完全隔离
-        tags="$ALL_TAGS"
-        if [ -n "$prefix" ]; then
-          prefixed=""
-          IFS=',' read -ra LIST <<< "$ALL_TAGS"
-          for t in "${LIST[@]}"; do
-            prefixed="${prefixed:+$prefixed,}${t%:*}:${prefix}${t##*:}"
+        # metadata-action 的 tags 输出是「每行一个完整镜像引用」的多行文本，
+        # 这里按行拆分并兼容逗号分隔，统一整理成数组
+        tags=()
+        while IFS= read -r line; do
+          line="${line//$'\r'/}"
+          [ -z "$line" ] && continue
+          IFS=',' read -ra parts <<< "$line"
+          for item in "${parts[@]}"; do
+            [ -n "$item" ] && tags+=("$item")
           done
-          tags="$prefixed"
+        done <<< "$ALL_TAGS"
+
+        # 1) 通道前缀：nightly 通道的所有标签都变成 nightly-<tag>，与稳定通道完全隔离
+        if [ -n "$prefix" ]; then
+          prefixed=()
+          for t in "${tags[@]}"; do
+            prefixed+=("${t%:*}:${prefix}${t##*:}")
+          done
+          tags=("${prefixed[@]}")
         fi
 
         # 2) publish_latest=false 时剔除 latest，留给提升步骤在验证通过后统一创建
         if [ "$PUBLISH_LATEST" = "false" ]; then
-          kept=""
-          IFS=',' read -ra LIST <<< "$tags"
-          for t in "${LIST[@]}"; do
+          kept=()
+          for t in "${tags[@]}"; do
             if [ "${t##*:}" != "$latest_tag" ]; then
-              kept="${kept:+$kept,}$t"
+              kept+=("$t")
             fi
           done
-          tags="$kept"
+          tags=("${kept[@]}")
         fi
 
-        if [ -z "$tags" ]; then
+        if [ "${#tags[@]}" -eq 0 ]; then
           echo "::error::标签集为空，中止构建"
           exit 1
         fi
 
-        primary="${tags%%,*}"
-        echo "tags=$tags" >> "$GITHUB_OUTPUT"
+        # 3) 输出逗号分隔的单行列表；多行直接写入 GITHUB_OUTPUT 会导致格式校验失败
+        tag_list="$(IFS=,; echo "${tags[*]}")"
+        primary="${tags[0]}"
+        echo "tags=$tag_list" >> "$GITHUB_OUTPUT"
         echo "primary=$primary" >> "$GITHUB_OUTPUT"
         echo "primary_tag=${primary##*:}" >> "$GITHUB_OUTPUT"
         echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+        echo "- 标签集: \`$tag_list\`" >> "$GITHUB_STEP_SUMMARY"
