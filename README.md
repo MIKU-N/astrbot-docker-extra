@@ -133,6 +133,16 @@ services:
 - **版本分离**：stable 与 nightly 是两个独立文件，标签前缀、锁文件、提升目标都是写死的字面量，而不是靠一个开关字符串区分。
 - **上游自动跟随**：每 6 小时检查一次上游 `latest` 与 `nightly-latest`，有更新时按通道构建，并把新的 digest 写回 [`.upstream/`](.upstream) 下的锁文件。
 
+### 所需密钥与变量
+
+| 名称 | 类型 | 用途 |
+| --- | --- | --- |
+| `DOCKER_USERNAME` | Secret | Docker Hub 用户名；未配置时跳过 Docker Hub 同步（GHCR 不受影响） |
+| `DOCKER_PASSWORD` | Secret | Docker Hub Access Token，不是账户密码 |
+| `DOCKERHUB_REPO` | Variable（可选） | Docker Hub 仓库名，默认取仓库名 `astrbot-docker-extra` |
+
+> Secret 名称必须与上表完全一致。工作流读取的是 `secrets.DOCKER_USERNAME` / `secrets.DOCKER_PASSWORD`，名字对不上时 Docker Hub 的登录与同步步骤会被**静默跳过**，只有 GHCR 推送照常进行。
+
 ---
 
 ## 目录结构
