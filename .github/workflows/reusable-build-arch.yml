@@ -52,10 +52,9 @@ jobs:
   build:
     name: 构建 ${{ inputs.arch }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      actions: write
+    # 这里不声明 permissions，改为继承调用方授予的权限。
+    # 若在此硬写 packages: write / actions: write，调用方只要给的是更小的权限集
+    # （例如 PR 校验只给 contents: read），GitHub 会判定整个 workflow 非法而无法启动。
     outputs:
       digest: ${{ steps.push.outputs.digest }}
       base_image: ${{ steps.base.outputs.image }}
