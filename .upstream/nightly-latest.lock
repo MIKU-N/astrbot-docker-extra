@@ -1,4 +1,4 @@
 # 上游基础镜像锁定信息
 # 由 .github/workflows/sync-upstream.yml 自动检测并更新，请勿手工编辑
 # 格式：<镜像引用>@<digest>
-soulter/astrbot@sha256:ce2fc0c8f37d8506144ea3fb14b90592867ca7d7369aff7e70d077a2e6a60eaf
+soulter/astrbot@sha256:0656185015c0a43bf2a09b79db5a1b53eb0eb194ada8eae96423f4baf17a63c9
